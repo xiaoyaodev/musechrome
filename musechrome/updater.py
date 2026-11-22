@@ -13,21 +13,36 @@ from . import REPO_URL, store
 from .netutil import _make_opener, _update_error_detail, fetch_bytes
 
 
+class _DownloadCancelled(Exception):
+    """下载被用户中断（内部信号，不当错误处理）。"""
+
+
 LATEST_API = (
     REPO_URL.replace("https://github.com/", "https://api.github.com/repos/")
     + "/releases/latest"
 )
-def _pick_exe_asset(release: dict) -> tuple[str, int, str]:
-    """从 Release JSON 里挑 exe 资产，返回 (下载地址, 字节数, sha256摘要)。
-    跳过名字带 setup 的安装包资产，只认便携版主程序。"""
+def _pick_update_asset(release: dict) -> tuple[str, int, str]:
+    """从 Release JSON 里挑更新资产，返回 (下载地址, 字节数, sha256摘要)。
+    安装包（名字带 setup 的 exe）优先——更新时静默运行它原地替换程序
+    文件；没有安装包才退回便携版主 exe；都没有返回空。"""
+    setup_hit = None
+    exe_hit = None
     for asset in release.get("assets") or []:
         name = str(asset.get("name") or "")
-        if not name.lower().endswith(".exe") or "setup" in name.lower():
+        if not name.lower().endswith(".exe"):
             continue
         digest = str(asset.get("digest") or "")
         sha = digest.split(":", 1)[1] if digest.startswith("sha256:") else ""
-        return str(asset.get("browser_download_url") or ""), int(asset.get("size") or 0), sha
-    return "", 0, ""
+        hit = (
+            str(asset.get("browser_download_url") or ""),
+            int(asset.get("size") or 0),
+            sha,
+        )
+        if "setup" in name.lower():
+            setup_hit = setup_hit or hit
+        else:
+            exe_hit = exe_hit or hit
+    return setup_hit or exe_hit or ("", 0, "")
 
 
 def build_updater_bat(src: Path, dst: Path) -> str:
@@ -72,6 +87,48 @@ def build_rename_bat(new_exe: Path, old_exe: Path) -> str:
     return "\r\n".join(lines) + "\r\n"
 
 
+def build_setup_bat(setup_exe: Path, app_dir: Path, app_exe: Path) -> str:
+    """生成安装包更新脚本：等旧程序退出后静默运行安装包，把程序文件
+    原地替换到当前目录（账号数据 MuseChromeData 保留），再启动新版，
+    最后删安装包和脚本自身。NSIS 的 /D 参数必须是最后一个且不能加引号。"""
+    lines = [
+        "@echo off",
+        "setlocal",
+        f'set "SETUP={setup_exe}"',
+        f'set "APPDIR={app_dir}"',
+        "timeout /t 2 /nobreak >nul",
+        '"%SETUP%" /S /D=%APPDIR%',
+        "timeout /t 1 /nobreak >nul",
+        f'start "" "{app_exe}"',
+        'del "%SETUP%" >nul 2>&1',
+        'del "%~f0"',
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _probe_asset(url: str, proxy_url: str | None) -> int:
+    """HEAD 探一下资产在不在，返回大小（字节），不在或探不到返回 0。
+
+    API 被限流时用发布页跳转拿到版本号，再按仓库固定的资产命名
+    （MuseChrome-Setup-<tag>.exe）探真实地址——探到了才报给界面，
+    探不到宁可让界面引导去发布页，也不给一个会 404 的地址。
+    """
+    routes = [proxy_url, None] if proxy_url else [None]
+    for px in routes:
+        try:
+            opener = _make_opener(px)
+            req = urllib.request.Request(
+                url, method="HEAD", headers={"User-Agent": "MuseChrome"}
+            )
+            with opener.open(req, timeout=10) as resp:
+                size = int(resp.headers.get("Content-Length") or 0)
+                if resp.status == 200 and size > 0:
+                    return size
+        except Exception:
+            continue
+    return 0
+
+
 class UpdateChecker(QThread):
     """后台查 GitHub 最新 Release；走软件里配置的本地代理（关代理则直连）。
 
@@ -89,12 +146,13 @@ class UpdateChecker(QThread):
     def run(self):
         try:
             raw, _final = fetch_bytes(
-                LATEST_API, self.proxy_url, timeout=12, log_tag="检查更新"
+                LATEST_API, self.proxy_url, timeout=12,
+                allow_direct=True, log_tag="检查更新",
             )
             data = json.loads(raw.decode("utf-8"))
             tag = str(data.get("tag_name") or "")
             if tag:
-                asset_url, size, sha = _pick_exe_asset(data)
+                asset_url, size, sha = _pick_update_asset(data)
                 self.done.emit(
                     True, tag, str(data.get("html_url") or ""), "", asset_url, size, sha
                 )
@@ -104,13 +162,21 @@ class UpdateChecker(QThread):
             try:
                 _raw, final_url = fetch_bytes(
                     REPO_URL + "/releases/latest", self.proxy_url,
-                    timeout=12, log_tag="检查更新(发布页)",
+                    timeout=12, allow_direct=True, log_tag="检查更新(发布页)",
                 )
                 m = re.search(r"/tag/([^/?#]+)", final_url)
                 if m:
                     tag = m.group(1)
-                    asset_url = f"{REPO_URL}/releases/download/{tag}/MuseChrome-{tag}.exe"
-                    self.done.emit(True, tag, final_url, "", asset_url, 0, "")
+                    # 按固定命名探安装包资产：探到才给地址（带大小校验），
+                    # 探不到就留空，界面引导去发布页——不重蹈拼错 404。
+                    asset_url, size = "", 0
+                    for name in (f"MuseChrome-Setup-{tag}.exe", f"MuseChrome-{tag}.exe"):
+                        cand = f"{REPO_URL}/releases/download/{tag}/{name}"
+                        probed = _probe_asset(cand, self.proxy_url)
+                        if probed > 0:
+                            asset_url, size = cand, probed
+                            break
+                    self.done.emit(True, tag, final_url, "", asset_url, size, "")
                     return
                 raise RuntimeError("没解析出版本号")
             except Exception:
@@ -133,12 +199,26 @@ class DownloadThread(QThread):
         self.expect_sha = expect_sha
 
     def run(self):
+        # 代理这条路断了（节点掐 TLS）自动换直连再下一次
+        routes = [self.proxy_url, None] if self.proxy_url else [None]
+        last_exc: Exception | None = None
+        for px in routes:
+            try:
+                self._download_once(_make_opener(px))
+                return
+            except _DownloadCancelled:
+                self.done.emit(False, "", "已取消")
+                return
+            except Exception as exc:
+                last_exc = exc
+        self.done.emit(False, "", _update_error_detail(last_exc) if last_exc else "下载失败")
+
+    def _download_once(self, opener):
         import hashlib
 
         part = self.dest.with_suffix(self.dest.suffix + ".part")
         try:
             self.dest.parent.mkdir(parents=True, exist_ok=True)
-            opener = _make_opener(self.proxy_url)
             req = urllib.request.Request(self.url, headers={"User-Agent": "MuseChrome"})
             h = hashlib.sha256()
             got = 0
@@ -148,8 +228,7 @@ class DownloadThread(QThread):
                     if self.isInterruptionRequested():
                         f.close()
                         part.unlink(missing_ok=True)
-                        self.done.emit(False, "", "已取消")
-                        return
+                        raise _DownloadCancelled()
                     chunk = resp.read(262144)
                     if not chunk:
                         break
@@ -159,14 +238,12 @@ class DownloadThread(QThread):
                     self.progress.emit(int(got * 100 / total) if total else -1)
             if self.expect_size and got != self.expect_size:
                 part.unlink(missing_ok=True)
-                self.done.emit(False, "", f"下载不完整（{got}/{self.expect_size} 字节）")
-                return
+                raise RuntimeError(f"下载不完整（{got}/{self.expect_size} 字节）")
             if self.expect_sha and h.hexdigest().lower() != self.expect_sha.lower():
                 part.unlink(missing_ok=True)
-                self.done.emit(False, "", "下载文件校验失败，已丢弃")
-                return
+                raise RuntimeError("下载文件校验失败，已丢弃")
             part.replace(self.dest)
             self.done.emit(True, str(self.dest), "")
-        except Exception as exc:
+        except Exception:
             part.unlink(missing_ok=True)
-            self.done.emit(False, "", _update_error_detail(exc))
+            raise

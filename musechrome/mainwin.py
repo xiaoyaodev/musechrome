@@ -42,7 +42,13 @@ from .notices import NoticeFetcher, NoticePage, parse_notices
 from .pages import AboutPage, PluginPage, SettingsPage
 from .iconutil import icon_path
 from .theme import C, FrostedHost, FrostedRoot, _paint_bg, app_style, fix_scroll, refresh_themed, set_theme, themed
-from .updater import DownloadThread, UpdateChecker, build_rename_bat, build_updater_bat
+from .updater import (
+    DownloadThread,
+    UpdateChecker,
+    build_rename_bat,
+    build_setup_bat,
+    build_updater_bat,
+)
 from .fxbuttons import FxButton
 from .themeswitch import DayNightSwitch
 from .widgets import AnimButton, RailWidget, RippleButton, TitleBar
@@ -1015,15 +1021,40 @@ class MainWindow(QMainWindow):
                 f"检查失败：{detail or '连不上 GitHub'}。\n（先确认代理工具开着、软件里的代理设置没关，再试一次。）",
             )
             return
+        # 同版本补丁（标签形如 v1.9.1.1、软件版本号不变）：装过就不再提示
+        if (store.parse_version(tag)[:3] == store.parse_version(__version__)
+                and tag.lstrip("vV") != __version__
+                and self.cfg.get("patch_tag", "") == tag):
+            QMessageBox.information(
+                self, "检查更新", f"已是最新版本（v{__version__}，补丁已装）。"
+            )
+            return
         if not store.is_newer(tag, __version__):
             QMessageBox.information(
                 self, "检查更新", f"已是最新版本（v{__version__}）。"
             )
             return
         frozen = bool(getattr(sys, "frozen", False))
+        is_setup = "setup" in asset_url.rsplit("/", 1)[-1].lower()
+        is_patch = (store.parse_version(tag)[:3] == store.parse_version(__version__)
+                    and tag.lstrip("vV") != __version__)
         box = QMessageBox(self)
         box.setWindowTitle("检查更新")
-        if frozen and asset_url:
+        if frozen and asset_url and is_setup:
+            if is_patch:
+                box.setText(
+                    f"发现 v{__version__} 的补丁（{tag}，版本号不变）。\n"
+                    "点「立即更新」直接在软件里下载补丁安装包，下载完自动安装、"
+                    "原地替换程序文件（账号数据保留），装完自动重新打开。"
+                )
+            else:
+                box.setText(
+                    f"发现新版本 {tag}（你现在是 v{__version__}）。\n"
+                    "点「立即更新」直接在软件里下载安装包，下载完自动安装、"
+                    "原地替换程序文件（账号数据保留），装完自动重新打开。"
+                )
+            btn_go = box.addButton("立即更新", QMessageBox.ButtonRole.AcceptRole)
+        elif frozen and asset_url:
             box.setText(
                 f"发现新版本 {tag}（你现在是 v{__version__}）。\n"
                 "点「立即更新」直接在软件里下载，下载完自动替换成新版并重新打开，不用去网页下。"
@@ -1031,7 +1062,7 @@ class MainWindow(QMainWindow):
             btn_go = box.addButton("立即更新", QMessageBox.ButtonRole.AcceptRole)
         else:
             box.setText(
-                f"发现新版本 {tag}（你现在是 v{__version__}）。\n点「打开下载页」去下载新版 exe。"
+                f"发现新版本 {tag}（你现在是 v{__version__}）。\n点「打开下载页」去下载新版。"
             )
             btn_go = box.addButton("打开下载页", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("以后再说", QMessageBox.ButtonRole.RejectRole)
@@ -1050,7 +1081,10 @@ class MainWindow(QMainWindow):
         # - 便携版（文件名带版本号）：新版直接下到当前 exe 同目录、用新版文件名，
         #   更新后文件名跟版本走，不再把新内容塞进旧文件名里。
         cur = Path(sys.executable)
-        if cur.name.lower() == "musechrome.exe":
+        if "setup" in asset_url.rsplit("/", 1)[-1].lower():
+            # 安装包更新：下到数据目录的 update 里，装的时候指回当前目录
+            dest = store.data_dir() / "update" / asset_url.rsplit("/", 1)[-1]
+        elif cur.name.lower() == "musechrome.exe":
             dest = store.data_dir() / "update" / f"MuseChrome-{tag}.exe"
         else:
             dest = cur.parent / f"MuseChrome-{tag}.exe"
@@ -1080,10 +1114,33 @@ class MainWindow(QMainWindow):
                     f"下载失败：{why}。\n（先确认代理工具开着，再试一次；也可以去 GitHub 发布页手动下载。）",
                 )
             return
+        # 补丁标签装机后记进配置文件，下次检查更新不再重复提示；
+        # 装的是正式新版本时把补丁标记清掉
+        try:
+            cfg_now = store.load_config()
+            if (store.parse_version(tag)[:3] == store.parse_version(__version__)
+                    and tag.lstrip("vV") != __version__):
+                cfg_now["patch_tag"] = tag
+            elif cfg_now.get("patch_tag"):
+                cfg_now["patch_tag"] = ""
+            store.save_config(cfg_now)
+        except Exception:
+            pass
         new_exe = Path(path)
         cur_exe = Path(sys.executable)
-        rename_mode = new_exe.parent == cur_exe.parent and new_exe != cur_exe
-        if rename_mode:
+        if "setup" in new_exe.name.lower():
+            QMessageBox.information(
+                self, "检查更新",
+                f"新版本 {tag} 的安装包已下载并校验通过。\n"
+                "点「确定」后软件会自动关闭、运行安装包原地替换程序文件"
+                "（账号数据保留），装完自动重新打开。",
+            )
+            bat = new_exe.parent / "apply_update.bat"
+            bat.write_text(
+                build_setup_bat(new_exe, cur_exe.parent, cur_exe),
+                encoding="mbcs",
+            )
+        elif new_exe.parent == cur_exe.parent and new_exe != cur_exe:
             QMessageBox.information(
                 self, "检查更新",
                 f"新版本 {tag} 已下载并校验通过（{new_exe.name}）。\n"
@@ -1113,9 +1170,11 @@ class MainWindow(QMainWindow):
     # ---------- 设置 ----------
     def save_settings(self):
         seen = self.cfg.get("notice_seen", "")
+        patch = self.cfg.get("patch_tag", "")
         old_theme = self.cfg.get("theme", "light")
         self.cfg = {**store.DEFAULT_CONFIG, **self.page_settings.collect()}
         self.cfg["notice_seen"] = seen  # 公告已读标记不在设置页里，别被保存设置冲掉
+        self.cfg["patch_tag"] = patch  # 补丁标记同理
         store.save_config(self.cfg)
         self._refresh_proxy_label()
         get_log().action("保存设置")

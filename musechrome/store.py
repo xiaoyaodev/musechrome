@@ -34,6 +34,7 @@ DEFAULT_CONFIG = {
     "lang_en": True,  # 启动参数 --lang=en-US
     "webrtc_protect": True,  # 禁止 WebRTC 走非代理 UDP，防真实 IP 泄漏
     "notice_seen": "",  # 已点开看过的最新公告指纹，用于公告按钮的（新）标记
+    "patch_tag": "",  # 已装过的同版本补丁标签（如 v1.9.1.1），防重复提示
     "theme": "light",  # dark 曜黑 / light 黑白分明（默认浅色，Smith 2026-11-22 定）
     "ui_v190_defaulted": False,  # v1.9.0 首次启动把外观强制回默认深色一次（老测试版存下的浅色不作数）
     "win_geo": None,  # [x, y, w, h] 外观切换进程重启时把窗口放回原位用
@@ -124,6 +125,7 @@ def load_config() -> dict:
     cfg["chrome_path"] = str(cfg["chrome_path"]).strip()
     cfg["edge_path"] = str(cfg["edge_path"]).strip()
     cfg["notice_seen"] = str(cfg["notice_seen"])
+    cfg["patch_tag"] = str(cfg.get("patch_tag") or "")
     return cfg
 
 

@@ -37,8 +37,9 @@ from .theme import app_style, set_theme  # noqa: F401
 from .updater import (  # noqa: F401
     DownloadThread,
     UpdateChecker,
-    _pick_exe_asset,
+    _pick_update_asset,
     build_rename_bat,
+    build_setup_bat,
     build_updater_bat,
 )
 

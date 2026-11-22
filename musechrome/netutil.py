@@ -136,7 +136,8 @@ def fetch_bytes(
 ) -> tuple[bytes, str]:
     """拉一个 URL 的内容，多条路轮着试，全程写日志，返回 (内容, 最终地址)。
 
-    顺序：合并证书+代理 → 打包证书+代理 →（允许时）合并证书+直连。
+    顺序：合并证书+代理 → 打包证书+代理 →（允许时）合并证书+直连
+    → 打包证书+直连。代理这条路断了（节点掐 TLS 等）会自动切直连。
     每条路失败的完整原因都记进日志，用户反馈时一看便知卡在哪。
     """
     from .applog import get_log
@@ -147,6 +148,7 @@ def fetch_bytes(
     ]
     if allow_direct and proxy_url:
         attempts.append(("合并证书+直连", None, _combined_context()))
+        attempts.append(("打包证书+直连", None, _bundled_context()))
     last_exc: Exception | None = None
     for label, px, ctx in attempts:
         try:

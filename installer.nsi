@@ -1,12 +1,14 @@
-; MuseChrome 安装包脚本（NSIS）：可选安装目录、桌面快捷方式、开始菜单、卸载项。
-; 构建：makensis -DVERSION=1.8.0 -DAPP_EXE=<MuseChrome.exe 路径> -DOUTFILE=<输出 setup 路径> installer.nsi
+; MuseChrome 安装包脚本（NSIS）：文件夹版整包安装，可选安装目录、
+; 桌面快捷方式、开始菜单、卸载项。升级安装时只替换程序文件，
+; MuseChromeData（账号数据）永远不动。
+; 构建：makensis -DVERSION=1.9.1 -DAPP_DIR=<dist 文件夹路径> -DOUTFILE=<输出 setup 路径> installer.nsi
 Unicode true
 
 !ifndef VERSION
-  !define VERSION "1.8.1"
+  !define VERSION "1.9.1"
 !endif
-!ifndef APP_EXE
-  !error "需要 -DAPP_EXE=主程序 exe 路径"
+!ifndef APP_DIR
+  !error "需要 -DAPP_DIR=PyInstaller 文件夹版输出目录"
 !endif
 !ifndef OUTFILE
   !define OUTFILE "MuseChrome-Setup-v${VERSION}.exe"
@@ -16,7 +18,7 @@ Name "Muse 账号管理器"
 OutFile "${OUTFILE}"
 InstallDir "$LOCALAPPDATA\MuseChrome"
 RequestExecutionLevel user
-SetCompressor /SOLID lzma
+SetCompressor zlib
 
 !include "MUI2.nsh"
 !define MUI_ICON "assets\icon.ico"
@@ -38,8 +40,13 @@ VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "MIT License"
 
 Section "安装" SecMain
+  ; 升级：先清掉旧版程序文件（_internal 整目录是纯程序文件，可安全清），
+  ; MuseChromeData 不在清理范围内，账号数据原样保留
+  RMDir /r "$INSTDIR\_internal"
+  Delete "$INSTDIR\MuseChrome.exe"
+
   SetOutPath "$INSTDIR"
-  File /oname=MuseChrome.exe "${APP_EXE}"
+  File /r "${APP_DIR}\*.*"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   ; 桌面快捷方式
@@ -64,6 +71,7 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\Muse 账号管理器\卸载.lnk"
   RMDir "$SMPROGRAMS\Muse 账号管理器"
   Delete "$INSTDIR\MuseChrome.exe"
+  RMDir /r "$INSTDIR\_internal"
   Delete "$INSTDIR\Uninstall.exe"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\MuseChrome"
   ; 只删程序文件；MuseChromeData（账号数据）保留，目录非空时 RMDir 自动跳过

@@ -29,6 +29,7 @@ class FxButton(AnimButton):
         super().__init__(text, parent)
         self._press_t = 0.0
         self._rendering = False
+        self._cache: QPixmap | None = None
         self._shadow_done = False
         self._press_anim = QVariantAnimation(self)
         self._press_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -38,11 +39,42 @@ class FxButton(AnimButton):
 
     # ---------- 按下缩小 ----------
     def _run_press(self, target: float):
+        if target > 0:
+            self._refresh_cache()
         self._press_anim.stop()
         self._press_anim.setDuration(130 if target > self._press_t else 200)
         self._press_anim.setStartValue(self._press_t)
         self._press_anim.setEndValue(target)
         self._press_anim.start()
+
+    def _refresh_cache(self):
+        """把按钮当前样子预先画进位图缓存（在 paintEvent 之外调用）。
+
+        以前是在 paintEvent 里现画现缩，Qt 会连发「Recursive repaint /
+        paintEngine / Painter not active」四条警告刷满日志；挪到按下
+        的那一刻先画好，绘制时只贴图缩放，警告不再出现。
+        """
+        if self.width() <= 0 or self.height() <= 0:
+            self._cache = None
+            return
+        self._rendering = True
+        try:
+            dpr = self.devicePixelRatioF()
+            pix = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
+            pix.setDevicePixelRatio(dpr)
+            pix.fill(Qt.GlobalColor.transparent)
+            pp = QPainter(pix)
+            self.render(pp)
+            pp.end()
+            self._cache = pix
+        except Exception:
+            self._cache = None
+        finally:
+            self._rendering = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._cache = None
 
     def _on_press_anim(self, value):
         self._press_t = float(value)
@@ -51,26 +83,21 @@ class FxButton(AnimButton):
     # ---------- 绘制 ----------
     def paintEvent(self, event):
         if self._press_t > 0.003 and not self._rendering:
-            # 先把正常状态画进位图，再整体缩小绘制（布局尺寸不变）
-            self._rendering = True
-            dpr = self.devicePixelRatioF()
-            pix = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
-            pix.setDevicePixelRatio(dpr)
-            pix.fill(Qt.GlobalColor.transparent)
-            pp = QPainter(pix)
-            self.render(pp)
-            pp.end()
-            self._rendering = False
-            painter = QPainter(self)
-            s = 1.0 - 0.08 * self._press_t
-            w2, h2 = self.width() * s, self.height() * s
-            painter.drawPixmap(
-                QRectF((self.width() - w2) / 2, (self.height() - h2) / 2, w2, h2),
-                pix,
-                QRectF(0, 0, self.width(), self.height()),
-            )
-            painter.end()
-            return
+            # 贴预先画好的位图并整体缩小（布局尺寸不变）；位图在
+            # _run_press 里画，不在这里现画——现画会触发 Qt 重绘警告；
+            # 缓存万一为空就直接画本体，绝不在 paintEvent 里补画
+            pix = self._cache
+            if pix is not None and not pix.isNull():
+                painter = QPainter(self)
+                s = 1.0 - 0.08 * self._press_t
+                w2, h2 = self.width() * s, self.height() * s
+                painter.drawPixmap(
+                    QRectF((self.width() - w2) / 2, (self.height() - h2) / 2, w2, h2),
+                    pix,
+                    QRectF(0, 0, self.width(), self.height()),
+                )
+                painter.end()
+                return
         self._paint_body(event)
 
     def _paint_body(self, event):

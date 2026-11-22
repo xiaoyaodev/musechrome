@@ -119,8 +119,18 @@ def install_hooks(log: AppLog) -> None:
     try:
         from PyQt6.QtCore import QtMsgType, qInstallMessageHandler
 
+        # 按钮按压动效走位图缩放时 Qt 会发的四句已知无害警告，不进日志
+        _QT_PAINT_NOISE = (
+            "QWidget::paintEngine",
+            "QPainter::begin: Paint device returned engine",
+            "QPainter::end: Painter not active",
+            "QWidget::repaint: Recursive repaint",
+        )
+
         def _qt_handler(mode, _ctx, msg):
             if mode in (QtMsgType.QtWarningMsg, QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+                if mode == QtMsgType.QtWarningMsg and msg.startswith(_QT_PAINT_NOISE):
+                    return
                 log.warn(f"Qt：{msg}")
 
         qInstallMessageHandler(_qt_handler)
