@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QUrl
 
-from . import APP_NAME, REPO_URL, __version__, extensions, store
+from . import APP_NAME, REPO_URL, __patch__, __version__, extensions, store
 from .applog import get_log
 from .cards import AccountCard
 from .dialogs import AccountEditDialog, AccountProxyDialog
@@ -1021,10 +1021,12 @@ class MainWindow(QMainWindow):
                 f"检查失败：{detail or '连不上 GitHub'}。\n（先确认代理工具开着、软件里的代理设置没关，再试一次。）",
             )
             return
-        # 同版本补丁（标签形如 v1.9.1.1、软件版本号不变）：装过就不再提示
+        # 同版本补丁（标签形如 v1.9.1.1、软件版本号不变）：装过就不再提示。
+        # 以构建自带的补丁等级为准（__patch__）——下载安装是旧构建干的，
+        # 靠配置文件记录会丢；配置里的 patch_tag 只作双保险。
         if (store.parse_version(tag)[:3] == store.parse_version(__version__)
                 and tag.lstrip("vV") != __version__
-                and self.cfg.get("patch_tag", "") == tag):
+                and (tag == __patch__ or self.cfg.get("patch_tag", "") == tag)):
             QMessageBox.information(
                 self, "检查更新", f"已是最新版本（v{__version__}，补丁已装）。"
             )
