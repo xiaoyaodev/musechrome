@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+MuseChromeData/
+build/
+dist/
+*.log
+tools/
+assets/media-generation-*
+assets/extensions/
+designs/
+unslop-story/
